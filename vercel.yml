@@ -1,0 +1,31 @@
+version: 2
+
+jobs:
+  build:
+    docker:
+      - image: node:20-slim
+    steps:
+      - checkout
+      - run: mkdir -p /home/node/app && chown -R node:node /home/node/app && mkdir -p /data && chown -R node:node /data
+      - run: cd /home/node/app && npm install
+      - run: cp -R $CIRCLE_WORKING_DIRECTORY/src /home/node/app/src
+      - run: cp $CIRCLE_WORKING_DIRECTORY/package*.json /home/node/app/
+      - run: cd /home/node/app && npm install
+
+  deploy:
+    docker:
+      - image: node:20-slim
+    steps:
+      - checkout
+      - attach_workspace:
+          at: /home/node/app
+      - run: docker run -p 3000:4000 your-image-name
+
+workflows:
+  version: 2
+  build_and_deploy:
+    jobs:
+      - build
+      - deploy:
+          requires:
+            - build
