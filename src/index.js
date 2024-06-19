@@ -20,6 +20,7 @@ const welcomeMessageHtml = config.welcomeMessage ? `${converter.makeHtml(config.
 
 // Corrected the path to the package.json file
 const addon = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf-8'));
+addon.name = 'HYJackettio';
 
 // Corrected the path to the configure.html file in the /src/template/ directory
 const configure = fs.readFileSync(path.join(__dirname, 'template', 'configure.html'), 'utf-8');
