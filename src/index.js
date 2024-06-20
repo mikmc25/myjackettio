@@ -1,29 +1,26 @@
-import fs from 'fs';
 import showdown from 'showdown';
+import compression from 'compression';
 import express from 'express';
 import localtunnel from 'localtunnel';
+import { rateLimit } from 'express-rate-limit';
+import { readFileSync } from "fs";
+import path, { dirname } from 'path';
 import { fileURLToPath } from 'url';
-import path from 'path';
 import config from './lib/config.js';
-import cache from './lib/cache.js';
+import cache, { vacuum as vacuumCache, clean as cleanCache } from './lib/cache.js';
+import * as icon from './lib/icon.js';
 import * as debrid from './lib/debrid.js';
 import { getIndexers } from './lib/jackett.js';
-import * as jackettio from "./lib/jackettio.js";
-import { cleanTorrentFolder, createTorrentFolder } from './lib/torrentInfos.js';
+import * as jackettio from './lib/jackettio.js';
+import { cleanTorrentFolder, createTorrentFolder, getTorrentFile } from './lib/torrentInfos.js';
+import redisClient from './redisClient.js'; // Import the Redis client
 
-// Get the current file URL and derive the directory path
 const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const __dirname = dirname(__filename);
 
 const converter = new showdown.Converter();
 const welcomeMessageHtml = config.welcomeMessage ? `${converter.makeHtml(config.welcomeMessage)}<div class="my-4 border-top border-secondary-subtle"></div>` : '';
-
-// Corrected the path to the package.json file
-const addon = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf-8'));
-
-// Corrected the path to the configure.html file in the /src/template/ directory
-const configure = fs.readFileSync(path.join(__dirname, 'template', 'configure.html'), 'utf-8');
-
+const addon = JSON.parse(readFileSync(path.join(__dirname, '..', 'package.json'), 'utf-8'));
 const app = express();
 
 const respond = (res, data) => {
@@ -31,7 +28,27 @@ const respond = (res, data) => {
   res.setHeader('Access-Control-Allow-Headers', '*');
   res.setHeader('Content-Type', 'application/json');
   res.send(data);
-}
+};
+
+const limiter = rateLimit({
+  windowMs: config.rateLimitWindow * 1000,
+  max: config.rateLimitRequest,
+  legacyHeaders: false,
+  standardHeaders: 'draft-7',
+  keyGenerator: (req) => req.clientIp || req.ip,
+  handler: (req, res, next, options) => {
+    if (req.route.path == '/:userConfig/stream/:type/:id.json') {
+      const resetInMs = new Date(req.rateLimit.resetTime) - new Date();
+      return res.json({ streams: [{
+        name: `${config.addonName}`,
+        title: `🛑 Too many requests, please try in ${Math.ceil(resetInMs / 1000 / 60)} minute(s).`,
+        url: '#'
+      }] });
+    } else {
+      return res.status(options.statusCode).send(options.message);
+    }
+  }
+});
 
 app.set('trust proxy', config.trustProxy);
 
@@ -43,16 +60,24 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(express.static(path.join(__dirname, 'static')));
-
-app.use((req, res, next) => {
-  console.log(`${req.method} ${req.path.replace(/\/eyJ[\w\=]+/g, '/*******************')}`);
-  next();
-});
+app.use(compression());
+app.use(express.static(path.join(__dirname, 'static'), { maxAge: 86400e3 }));
 
 app.get('/', (req, res) => {
   res.redirect('/configure');
   res.end();
+});
+
+app.get('/icon', async (req, res) => {
+  const filePath = await icon.getLocation();
+  res.contentType(path.basename(filePath));
+  res.setHeader('Cache-Control', `public, max-age=${3600}`);
+  return res.sendFile(filePath);
+});
+
+app.use((req, res, next) => {
+  console.log(`${req.method} ${req.path.replace(/\/eyJ[\w\=]+/g, '/*******************')}`);
+  next();
 });
 
 app.get('/:userConfig?/configure', async (req, res) => {
@@ -66,7 +91,7 @@ app.get('/:userConfig?/configure', async (req, res) => {
     debrids: await debrid.list(),
     addon: {
       version: addon.version,
-      name: addon.name.charAt(0).toUpperCase() + addon.name.slice(1)
+      name: config.addonName
     },
     userConfig: req.params.userConfig || '',
     defaultUserConfig: config.defaultUserConfig,
@@ -74,30 +99,29 @@ app.get('/:userConfig?/configure', async (req, res) => {
     languages: config.languages.map(l => ({ value: l.value, label: l.label })).filter(v => v.value != 'multi'),
     sorts: config.sorts,
     indexers,
-    passkey: { required: false },
+    passkey: { enabled: false },
     immulatableUserConfigKeys: config.immulatableUserConfigKeys
   };
   if (config.replacePasskey) {
     templateConfig.passkey = {
-      required: true,
+      enabled: true,
       infoUrl: config.replacePasskeyInfoUrl,
       pattern: config.replacePasskeyPattern
-    }
+    };
   }
-  let template = configure.toString()
+  let template = readFileSync(path.join(__dirname, 'template', 'configure.html'), 'utf-8')
     .replace('/** import-config */', `const config = ${JSON.stringify(templateConfig, null, 2)}`)
     .replace('<!-- welcome-message -->', welcomeMessageHtml);
   return res.send(template);
 });
 
-// https://github.com/Stremio/stremio-addon-sdk/blob/master/docs/advanced.md#using-user-data-in-addons
 app.get("/:userConfig?/manifest.json", async (req, res) => {
   const manifest = {
     id: config.addonId,
     version: addon.version,
-    name: addon.name,
-    description: addon.description,
-    icon: "https://avatars.githubusercontent.com/u/15383019?s=48&v=4",
+    name: config.addonName,
+    description: config.addonDescription,
+    icon: `${req.hostname == 'localhost' ? 'http' : 'https'}://${req.hostname}/icon`,
     resources: ["stream"],
     types: ["movie", "series"],
     idPrefixes: ["tt"],
@@ -112,19 +136,54 @@ app.get("/:userConfig?/manifest.json", async (req, res) => {
   respond(res, manifest);
 });
 
-app.get("/:userConfig/stream/:type/:id.json", async (req, res) => {
+const streamTemplate = (stream, type, hostname) => ({
+  name: config.addonName,
+  title: stream.title || (type === 'movie' ? 'HD Movie' : 'HD Series'),
+  description: stream.description || `Stream from ${config.addonName}`,
+  logo: stream.logo || `${hostname == 'localhost' ? 'http' : 'https'}://${hostname}/icon`,
+  background: stream.background || `${hostname == 'localhost' ? 'http' : 'https'}://${hostname}/background.jpg`,
+  type: stream.type || type,
+  infoHash: stream.infoHash,
+  fileIdx: stream.fileIdx,
+  isFree: stream.isFree !== undefined ? stream.isFree : true,
+  externalUrl: stream.externalUrl,
+  subtitles: stream.subtitles || [],
+  behaviorHints: {
+    playerAutoLaunch: true,
+    notWebReady: false,
+    ...stream.behaviorHints
+  }
+});
+
+app.get("/:userConfig/stream/:type/:id.json", limiter, async (req, res) => {
   try {
-    const streams = await jackettio.getStreams(
+    const rawStreams = await jackettio.getStreams(
       Object.assign(JSON.parse(atob(req.params.userConfig)), { ip: req.clientIp }),
       req.params.type,
       req.params.id,
       `${req.hostname == 'localhost' ? 'http' : 'https'}://${req.hostname}`
     );
+
+    // Example Redis usage: set and get a value
+    await redisClient.set('last_stream', JSON.stringify({ type: req.params.type, id: req.params.id }));
+    const lastStream = await redisClient.get('last_stream');
+    console.log('Last stream:', lastStream);
+
+    const streams = rawStreams.map(stream => streamTemplate(stream, req.params.type, req.hostname));
+
     return respond(res, { streams });
   } catch (err) {
-    console.log(err);
+    console.log(req.params.id, err);
     return respond(res, { streams: [] });
   }
+});
+
+app.get("/stream/:type/:id.json", async (req, res) => {
+  return respond(res, { streams: [{
+    name: config.addonName,
+    title: `ℹ Kindly configure this addon to access streams.`,
+    url: '#'
+  }] });
 });
 
 app.get('/:userConfig/download/:type/:id/:torrentId', async (req, res) => {
@@ -138,12 +197,12 @@ app.get('/:userConfig/download/:type/:id/:torrentId', async (req, res) => {
 
     const parsed = new URL(url);
     const cut = (value) => value ? `${value.substr(0, 5)}******${value.substr(-5)}` : '';
-    console.log(`Redirect: ${parsed.protocol}//${parsed.host}${cut(parsed.pathname)}${cut(parsed.search)}`);
+    console.log(`${req.params.id} : Redirect: ${parsed.protocol}//${parsed.host}${cut(parsed.pathname)}${cut(parsed.search)}`);
 
     res.redirect(url);
     res.end();
   } catch (err) {
-    console.log(err);
+    console.log(req.params.id, err);
 
     switch (err.message) {
       case debrid.ERROR.NOT_READY:
@@ -154,72 +213,41 @@ app.get('/:userConfig/download/:type/:id/:torrentId', async (req, res) => {
         res.redirect(`/videos/expired_api_key.mp4`);
         res.end();
         break;
-      case debrid.ERROR.NOT_PREMIUM:
-        res.redirect(`/videos/not_premium.mp4`);
+      default:
+        res.redirect(`/videos/not_available.mp4`);
         res.end();
         break;
-      default:
-        res.redirect(`/videos/error.mp4`);
-        res.end();
     }
   }
 });
 
-app.use((req, res) => {
-  if (req.xhr) {
-    res.status(404).send({ error: 'Page not found!' });
-  } else {
-    res.status(404).send('Page not found!');
-  }
+app.get('/videos/:name.mp4', async (req, res) => {
+  return res.sendFile(path.join(__dirname, 'videos', `${req.params.name}.mp4`));
 });
 
-app.use((err, req, res, next) => {
-  console.error(err.stack);
-  if (req.xhr) {
-    res.status(500).send({ error: 'Something broke!' });
-  } else {
-    res.status(500).send('Something broke!');
-  }
-});
+// regularly remove torrents to keep within the file number limit on the free plan
+setInterval(() => {
+  cleanTorrentFolder();
+}, 3600e3 * 2).unref();
 
-const server = app.listen(config.port, async () => {
-  console.log('───────────────────────────────────────');
-  console.log(`Started addon ${addon.name} v${addon.version}`);
-  console.log(`Server listen at: http://localhost:${config.port}`);
-  console.log('───────────────────────────────────────');
+if (config.vacuumCacheInterval) {
+  setInterval(vacuumCache, config.vacuumCacheInterval).unref();
+}
 
-  let tunnel;
+// clean cache if 3 days old
+setInterval(() => {
+  cleanCache(3 * 24 * 60 * 60 * 1000);
+}, 6 * 60e3).unref();
+
+createTorrentFolder();
+
+app.listen(config.port, async () => {
+  console.log(`Addon active on port ${config.port}`);
   if (config.localtunnel) {
-    let subdomain = await cache.get('localtunnel:subdomain');
-    tunnel = await localtunnel({ port: config.port, subdomain });
-    await cache.set('localtunnel:subdomain', tunnel.clientId, { ttl: 86400 * 365 });
-    console.log(`Your addon is available on the following address: ${tunnel.url}/configure`);
-    tunnel.on('close', () => console.log("tunnels are closed"));
-  }
-
-  createTorrentFolder();
-  let cleanTorrentFolderInterval = setInterval(cleanTorrentFolder, 3600e3);
-
-  function closeGracefully(signal) {
-    console.log(`Received signal to terminate: ${signal}`);
-    if (tunnel) tunnel.close();
-    clearInterval(cleanTorrentFolderInterval);
-    server.close(() => {
-      console.log('Server closed');
-      process.kill(process.pid, signal);
+    const tunnel = await localtunnel({ port: config.port });
+    console.log(`Add-on public url: ${tunnel.url}`);
+    tunnel.on('close', () => {
+      console.log('Tunnel closed');
     });
   }
-  process.once('SIGINT', closeGracefully);
-  process.once('SIGTERM', closeGracefully);
 });
-
-// Ensure /tmp/torrents directory exists
-const ensureTorrentFolderExists = () => {
-  const torrentFolderPath = '/tmp/torrents';
-  if (!fs.existsSync(torrentFolderPath)) {
-    fs.mkdirSync(torrentFolderPath, { recursive: true });
-    console.log(`Created directory: ${torrentFolderPath}`);
-  }
-};
-
-ensureTorrentFolderExists();
