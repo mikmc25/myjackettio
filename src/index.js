@@ -1,4 +1,5 @@
 import fs from 'fs';
+import dotenv from 'dotenv';
 import showdown from 'showdown';
 import express from 'express';
 import localtunnel from 'localtunnel';
@@ -11,6 +12,9 @@ import { getIndexers } from './lib/jackett.js';
 import * as jackettio from './lib/jackettio.js';
 import { cleanTorrentFolder, createTorrentFolder } from './lib/torrentInfos.js';
 
+// Load environment variables from .env file
+dotenv.config();
+
 // Get the current file URL and derive the directory path
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -20,7 +24,8 @@ const welcomeMessageHtml = config.welcomeMessage ? `${converter.makeHtml(config.
 
 // Corrected the path to the package.json file
 const addon = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf-8'));
-addon.name = 'HYJackettio';
+// Use the ADDON_NAME environment variable, defaulting to the original name if not set
+addon.name = process.env.ADDON_NAME || 'HYJackettio';
 
 // Corrected the path to the configure.html file in the /src/template/ directory
 const configure = fs.readFileSync(path.join(__dirname, 'template', 'configure.html'), 'utf-8');
