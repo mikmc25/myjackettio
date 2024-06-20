@@ -8,7 +8,7 @@ import config from './lib/config.js';
 import cache from './lib/cache.js';
 import * as debrid from './lib/debrid.js';
 import { getIndexers } from './lib/jackett.js';
-import * as jackettio from "./lib/jackettio.js";
+import * as jackettio from './lib/jackettio.js';
 import { cleanTorrentFolder, createTorrentFolder } from './lib/torrentInfos.js';
 
 // Get the current file URL and derive the directory path
@@ -32,7 +32,7 @@ const respond = (res, data) => {
   res.setHeader('Access-Control-Allow-Headers', '*');
   res.setHeader('Content-Type', 'application/json');
   res.send(data);
-}
+};
 
 app.set('trust proxy', config.trustProxy);
 
@@ -121,7 +121,23 @@ app.get("/:userConfig/stream/:type/:id.json", async (req, res) => {
       req.params.id,
       `${req.hostname == 'localhost' ? 'http' : 'https'}://${req.hostname}`
     );
-    return respond(res, { streams });
+
+    // Enhancing aesthetics of the stream data
+    const enhancedStreams = streams.map(stream => ({
+      ...stream,
+      name: `${stream.name} - ${formatSize(stream.size)} 💾`,
+      title: `
+        <div>
+          <strong>${stream.title}</strong>
+          <div>💾 Size: ${formatSize(stream.size)}</div>
+          <div>👤 Seeders: ${stream.seeders}</div>
+          <div>🌐 Language: ${stream.language}</div>
+        </div>
+      `,
+      tag: `<div style="color: green;">${stream.tag}</div>`
+    }));
+
+    return respond(res, { streams: enhancedStreams });
   } catch (err) {
     console.log(err);
     return respond(res, { streams: [] });
@@ -166,6 +182,18 @@ app.get('/:userConfig/download/:type/:id/:torrentId', async (req, res) => {
   }
 });
 
+// Ensure /tmp/torrents directory exists
+const ensureTorrentFolderExists = () => {
+  const torrentFolderPath = '/tmp/torrents';
+  if (!fs.existsSync(torrentFolderPath)) {
+    fs.mkdirSync(torrentFolderPath, { recursive: true });
+    console.log(`Created directory: ${torrentFolderPath}`);
+  }
+};
+
+ensureTorrentFolderExists();
+
+// Error handling middleware for 404 (Not Found) and 500 (Internal Server Error)
 app.use((req, res) => {
   if (req.xhr) {
     res.status(404).send({ error: 'Page not found!' });
@@ -195,7 +223,7 @@ const server = app.listen(config.port, async () => {
     tunnel = await localtunnel({ port: config.port, subdomain });
     await cache.set('localtunnel:subdomain', tunnel.clientId, { ttl: 86400 * 365 });
     console.log(`Your addon is available on the following address: ${tunnel.url}/configure`);
-    tunnel.on('close', () => console.log("tunnels are closed"));
+    tunnel.on('close', () => console.log("Tunnels are closed"));
   }
 
   createTorrentFolder();
@@ -214,13 +242,9 @@ const server = app.listen(config.port, async () => {
   process.once('SIGTERM', closeGracefully);
 });
 
-// Ensure /tmp/torrents directory exists
-const ensureTorrentFolderExists = () => {
-  const torrentFolderPath = '/tmp/torrents';
-  if (!fs.existsSync(torrentFolderPath)) {
-    fs.mkdirSync(torrentFolderPath, { recursive: true });
-    console.log(`Created directory: ${torrentFolderPath}`);
-  }
-};
-
-ensureTorrentFolderExists();
+function formatSize(bytes) {
+  const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+  if (bytes == 0) return '0 Byte';
+  const i = parseInt(Math.floor(Math.log(bytes) / Math.log(1024)));
+  return Math.round(bytes / Math.pow(1024, i), 2) + ' ' + sizes[i];
+}
