@@ -29,6 +29,35 @@ export async function getMovieById(id){
 
 }
 
+export async function getOtherById(id){
+
+  let meta = await cache.get(`meta:other:${id}`);
+
+  if(!meta){
+
+    const res = await fetch(`https://v3-cinemeta.strem.io/meta/movie/${id}.json`);
+    const json = await res.json();
+    meta = json.meta;
+
+    if(!meta){
+      throw new Error(`Meta not found for other ${id}`);
+    }
+
+    await cache.set(`meta:other:${id}`, meta, {ttl: 3600});
+
+  }
+
+  return {
+    name: meta.name,
+    year: parseInt(meta.releaseInfo),
+    imdb_id: meta.imdb_id,
+    type: 'movie',
+    stremioId: id,
+    id,
+  };
+
+}
+
 export async function getEpisodeById(id, season, episode){
 
   let meta = await cache.get(`meta:series:${id}`);
