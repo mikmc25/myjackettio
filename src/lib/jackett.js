@@ -6,7 +6,8 @@ import {numberPad} from './util.js';
 
 export const CATEGORY = {
   MOVIE: 2000,
-  SERIES: 5000
+  SERIES: 5000,
+  OTHER: 8000
 };
 
 export async function searchMovieTorrents({indexer, name, year}){
