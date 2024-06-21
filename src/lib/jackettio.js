@@ -23,8 +23,10 @@ async function getMetaInfos(type, stremioId){
     return meta.getMovieById(id);
   }else if(type == 'series'){
     return meta.getEpisodeById(id, season, episode);
+  }else if(type == 'other'){
+    return meta.getMovieById(id);
   }else{
-    throw new Error(`Unsuported type ${type}`);
+    throw new Error(`Unsupported type ${type}`);
   }
 }
 
@@ -130,6 +132,17 @@ async function getTorrents(userConfig, metaInfos, debridInstance){
         const bestPackTorrents = packsTorrents.slice(0, Math.min(packsTorrents.length, priotizePackTorrents));
         torrents.splice(bestPackTorrents.length * -1, bestPackTorrents.length, ...bestPackTorrents);
       }
+
+    }else if(type == 'other'){
+
+      const promises = indexers.map(indexer => promiseTimeout(jackett.searchOtherTorrents({...metaInfos, indexer: indexer.id}), indexerTimeoutSec*1000).catch(err => []));
+      torrents = [].concat(...(await Promise.all(promises)));
+
+      console.log(`${stremioId} : ${torrents.length} torrents found in ${(new Date() - startDate) / 1000}s`);
+
+      torrents = torrents.filter(filterSearch).sort(sortBy(...sortSearch));
+      torrents = priotizeItems(torrents, filterLanguage, Math.max(1, Math.round(maxTorrents * 0.33)));
+      torrents = torrents.slice(0, maxTorrents + 2);
 
     }
 
@@ -259,7 +272,7 @@ export async function getStreams(userConfig, type, stremioId, publicUrl){
 
   const torrents = await getTorrents(userConfig, metaInfos, debridInstance);
 
-  // Prepare next expisode torrents list
+  // Prepare next episode torrents list
   if(type == 'series'){
     prepareNextEpisode({...userConfig, forceCacheNextEpisode: false}, metaInfos, debridInstance);
   }
@@ -300,7 +313,7 @@ export async function getDownload(userConfig, type, stremioId, torrentId){
 
   try {
 
-    // Prepare next expisode debrid cache
+    // Prepare next episode debrid cache
     if(type == 'series' && userConfig.forceCacheNextEpisode){
       getMetaInfos(type, stremioId).then(metaInfos => prepareNextEpisode(userConfig, metaInfos, debridInstance));
     }
@@ -320,9 +333,12 @@ export async function getDownload(userConfig, type, stremioId, torrentId){
 
     }else if(type == 'series'){
 
-      let bestFile = searchEpisodeFile(files) || files[0];
+      let bestFile = searchEpisodeFile(files, season, episode) || files[0];
       download = await debridInstance.getDownload(bestFile);
 
+    }else if(type == 'other'){
+      // Logic to select the best file for 'other' type
+      download = await debridInstance.getDownload(files[0]); // Adjust logic as needed
     }
 
     if(download){
